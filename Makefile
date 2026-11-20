@@ -10,3 +10,9 @@ pre-commit:
 pre-commit-install:
 	venv/bin/pip install pre-commit
 	$(PRE_COMMIT) install
+
+.PHONY: test
+
+## Run the test suite
+test:
+	venv/bin/python -m django test tests --settings=tests.settings
