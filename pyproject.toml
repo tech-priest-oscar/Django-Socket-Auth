@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "django-socket-auth"
+dynamic = ["version"]
+description = "JWT authentication for Django Channels websockets using djangorestframework-simplejwt"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "Django>=4.2",
+    "channels>=4.0",
+    "djangorestframework>=3.14",
+    "djangorestframework-simplejwt>=5.3",
+]
+
+[tool.setuptools]
+# Only ship the package, not the example project.
+packages = ["django_socket_auth"]
+
+[tool.setuptools.dynamic]
+version = { attr = "django_socket_auth.__version__" }
