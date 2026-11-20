@@ -1,14 +1,17 @@
 # django-socket-auth
 
-JWT authentication for [Django Channels](https://channels.readthedocs.io/)
+Pluggable authentication for [Django Channels](https://channels.readthedocs.io/)
 websocket consumers.
 
-It authenticates websocket connections with the same access tokens your REST
-API already issues through
+Out of the box it authenticates websocket connections with the same access
+tokens your REST API already issues through
 [djangorestframework-simplejwt](https://django-rest-framework-simplejwt.readthedocs.io/),
-so clients log in once and use one token for both HTTP and websockets.
+so clients log in once and use one token for both HTTP and websockets. You can
+also plug in your own authentication: return a user and it goes into
+`scope["user"]`.
 
 - Works with the default Django user model or any custom one
+- Bring your own auth with a small backend class (sync or async)
 - Accepts the token in a header **or** the query string (for browsers)
 - Respects your existing `SIMPLE_JWT` settings
 - No models, no migrations, nothing to add to `INSTALLED_APPS`
@@ -53,12 +56,12 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myproject.settings")
 django_asgi_app = get_asgi_application()
 
 # Import anything that touches models *after* get_asgi_application()
-from django_socket_auth.middleware import JWTAuthMiddleware
+from django_socket_auth.middleware import SocketAuthMiddleware
 from myapp.routing import websocket_urlpatterns
 
 application = ProtocolTypeRouter({
     "http": django_asgi_app,
-    "websocket": JWTAuthMiddleware(URLRouter(websocket_urlpatterns)),
+    "websocket": SocketAuthMiddleware(URLRouter(websocket_urlpatterns)),
 })
 ```
 
@@ -111,16 +114,21 @@ async with websockets.connect(
 
 ### Middleware
 
-`JWTAuthMiddleware` reads the access token from the handshake, in this order:
+`SocketAuthMiddleware` asks each configured backend, in order, to authenticate
+the connection. The first authenticated user returned is put in
+`scope["user"]`. A backend that returns `None` or `AnonymousUser` has failed,
+and the next backend is tried. If every backend fails, `scope["user"]` is set
+to `AnonymousUser`.
+
+The default backend, `SimpleJWTBackend`, reads the access token from the
+handshake, in this order:
 
 1. `Authorization: Bearer <access>` header
-2. `token: <access>` header
-3. `?token=<access>` query string
+2. `?token=<access>` query string
 
-It then validates the token with simplejwt and sets `scope["user"]` to the
-token's user. If the token is missing, malformed, expired, the wrong type (for
-example a refresh token), or belongs to an inactive or deleted user,
-`scope["user"]` is set to `AnonymousUser` instead.
+It then validates the token with simplejwt. If the token is missing,
+malformed, expired, the wrong type (for example a refresh token), or belongs to
+an inactive or deleted user, it returns no user.
 
 The middleware never rejects a connection by itself. That is up to the
 consumer, so you can still serve anonymous users on some routes if you want.
@@ -131,7 +139,7 @@ consumer, so you can still serve anonymous users on some routes if you want.
 |---|---|
 | `AuthenticatedWebsocketConsumer` | Text or bytes messages (`AsyncWebsocketConsumer`) |
 | `AuthenticatedJsonWebsocketConsumer` | JSON messages (`AsyncJsonWebsocketConsumer`) |
-| `JWTAuthConsumerMixin` | Adding the check to your own consumer base class |
+| `SocketAuthConsumerMixin` | Adding the check to your own consumer base class |
 
 Unauthenticated connections are accepted and then immediately closed with
 code **4001**, so the client can tell an auth failure apart from other errors.
@@ -146,40 +154,182 @@ To use the mixin with your own base class, put it first:
 
 ```python
 from channels.generic.websocket import AsyncWebsocketConsumer
-from django_socket_auth.consumers import JWTAuthConsumerMixin
+from django_socket_auth.consumers import SocketAuthConsumerMixin
 
 
-class MyBaseConsumer(JWTAuthConsumerMixin, AsyncWebsocketConsumer):
+class MyBaseConsumer(SocketAuthConsumerMixin, AsyncWebsocketConsumer):
     ...
 ```
 
-### Customising the middleware
+## Custom authentication
 
-`JWTAuthMiddleware` has two methods you can override in a subclass:
+A backend is a class with an `authenticate(scope)` method. Return a user to
+authenticate the connection, or `None` to let the next backend try.
 
-| Method | Description |
-|---|---|
-| `get_raw_token(scope)` | Returns the raw token string from the scope, or `None` |
-| `await get_user(raw_token)` | Returns the token's user, or `AnonymousUser` |
+`authenticate` can be a normal method or an `async def`. Normal methods run in
+a worker thread, so you can use the Django ORM directly.
 
-For example, to read the token only from a cookie:
+### Backend interface
+
+These are the methods the package calls. Subclassing `BaseBackend` or
+`TokenBackend` is optional: any class with an `authenticate(scope)` method
+works.
+
+**`BaseBackend`**: implement your own authentication from scratch.
+
+| Method | Required | Receives | Must return |
+|---|---|---|---|
+| `authenticate(self, scope)` | Yes | The ASGI connection [`scope`](https://asgi.readthedocs.io/en/latest/specs/www.html#websocket-connection-scope) dict | A user object, or `None` |
+
+**`TokenBackend`**: the package finds the token; you check it.
+
+| Method | Required | Receives | Must return |
+|---|---|---|---|
+| `authenticate_token(self, token)` | Yes | The raw token string (never empty) | A user object, or `None` |
+| `get_raw_token(self, scope)` | No (override to read the token from elsewhere) | The ASGI connection `scope` dict | The token string, or `None` |
+
+Do not override `authenticate` on a `TokenBackend`. It is what calls
+`get_raw_token` and then `authenticate_token`.
+
+Each method can be a normal `def` or an `async def`.
+
+#### Rules for every backend
+
+- **Return `None` (or `AnonymousUser()`) when you can't authenticate the
+  connection.** Both count as a failed attempt, and the next backend is tried.
+- **Don't raise for a bad or missing credential.** Return `None` instead. An
+  exception raised from a backend is not caught, so the connection fails with a
+  server error instead of being closed with `4001`.
+- **Don't store per-connection data on `self`.** One instance of each backend
+  is created when the middleware is built and shared by every connection,
+  including connections handled at the same time.
+- **The user you return is put into `scope["user"]` as is.** The consumers
+  check `user.is_authenticated`, so return a real user model instance (or any
+  object with `is_authenticated = True`).
+
+#### Full sample
 
 ```python
-from http.cookies import SimpleCookie
+# myapp/socket_auth.py
+from django_socket_auth.backends import BaseBackend, TokenBackend
 
-from django_socket_auth.middleware import JWTAuthMiddleware
+from myapp.models import ApiKey
 
 
-class CookieJWTAuthMiddleware(JWTAuthMiddleware):
-    def get_raw_token(self, scope):
-        headers = dict(scope.get("headers", []))
-        cookie = SimpleCookie(headers.get(b"cookie", b"").decode("latin1"))
-        return cookie["access"].value if "access" in cookie else None
+class MyBackend(BaseBackend):
+    """Your own authentication, from scratch."""
+
+    def authenticate(self, scope):
+        """
+        scope["headers"]      -> list of (name, value) byte pairs, names lower-case
+        scope["query_string"] -> raw query string bytes, e.g. b"token=abc"
+        scope["path"]         -> e.g. "/ws/chat/"
+        scope["client"]       -> (ip, port)
+
+        Return a user to authenticate the connection, or None to let the next
+        backend try.
+        """
+        headers = dict(scope["headers"])
+        api_key = headers.get(b"x-api-key", b"").decode("latin1")
+        if not api_key:
+            return None
+        key = ApiKey.objects.select_related("user").filter(key=api_key).first()
+        return key.user if key else None
+
+
+class MyTokenBackend(TokenBackend):
+    """The token comes from `Authorization: Bearer ...` or `?token=...`."""
+
+    def authenticate_token(self, token):
+        """`token` is the raw token string. Return its user, or None."""
+        key = ApiKey.objects.select_related("user").filter(key=token).first()
+        return key.user if key else None
+
+    # Optional: only if the token lives somewhere else.
+    # def get_raw_token(self, scope):
+    #     return dict(scope["headers"]).get(b"x-api-key", b"").decode() or None
+
+
+class MyAsyncTokenBackend(TokenBackend):
+    """Same as above, written with `async def`."""
+
+    async def authenticate_token(self, token):
+        key = await ApiKey.objects.select_related("user").filter(key=token).afirst()
+        return key.user if key else None
 ```
+
+Then turn it on (see [Turning backends on](#turning-backends-on)):
+
+```python
+SOCKET_AUTH_BACKENDS = ["myapp.socket_auth.MyTokenBackend"]
+```
+
+### Use your own auth: return a user
+
+Subclass `BaseBackend` when you already have a way to work out the user, for
+example from a session, a signed cookie or another service:
+
+```python
+from django_socket_auth.backends import BaseBackend
+
+from myapp.auth import user_from_cookie
+
+
+class MyCookieBackend(BaseBackend):
+    def authenticate(self, scope):
+        headers = dict(scope["headers"])
+        return user_from_cookie(headers.get(b"cookie", b""))  # user or None
+```
+
+### Reuse the token handling: check the token yourself
+
+Subclass `TokenBackend` when clients send a token, but it isn't a simplejwt
+token (for example an API key or a token from another provider). It reads
+the token from the header or query string for you; you only turn it into a
+user:
+
+```python
+from django_socket_auth.backends import TokenBackend
+
+from myapp.models import ApiKey
+
+
+class ApiKeyBackend(TokenBackend):
+    def authenticate_token(self, token):
+        key = ApiKey.objects.select_related("user").filter(key=token).first()
+        return key.user if key else None
+```
+
+`authenticate_token` can also be `async def`. To read the token from somewhere
+else, override `get_raw_token(scope)` as well.
+
+### Turning backends on
+
+For the whole project, in `settings.py`:
+
+```python
+SOCKET_AUTH_BACKENDS = [
+    "myapp.socket_auth.ApiKeyBackend",
+    "django_socket_auth.backends.SimpleJWTBackend",  # keep JWT working too
+]
+```
+
+Or for one set of routes, when building the middleware:
+
+```python
+SocketAuthMiddleware(URLRouter(websocket_urlpatterns), auth_backends=[ApiKeyBackend])
+```
+
+`auth_backends` takes dotted paths, classes or instances. Passing it overrides
+`SOCKET_AUTH_BACKENDS` for that middleware.
 
 ## Configuration
 
-There are no settings of its own. Token validation uses your project's
+| Setting | Default | |
+|---|---|---|
+| `SOCKET_AUTH_BACKENDS` | `["django_socket_auth.backends.SimpleJWTBackend"]` | Backends to try, in order |
+
+`SimpleJWTBackend` validates tokens with your project's
 [`SIMPLE_JWT` settings](https://django-rest-framework-simplejwt.readthedocs.io/en/latest/settings.html)
 (signing key, algorithm, token lifetimes, user ID claim, and so on).
 

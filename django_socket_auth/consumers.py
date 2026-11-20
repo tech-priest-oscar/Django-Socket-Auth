@@ -7,11 +7,11 @@ from channels.generic.websocket import (
 UNAUTHENTICATED_CLOSE_CODE = 4001
 
 
-class JWTAuthConsumerMixin:
+class SocketAuthConsumerMixin:
     """
     Only lets authenticated users connect.
 
-    Requires ``JWTAuthMiddleware`` (or any middleware that sets
+    Requires ``SocketAuthMiddleware`` (or any middleware that sets
     ``scope["user"]``). Unauthenticated connections are accepted and then
     immediately closed with ``unauthenticated_close_code`` so the client can
     tell an auth failure apart from other errors.
@@ -36,11 +36,11 @@ class JWTAuthConsumerMixin:
         await self.accept()
 
 
-class AuthenticatedWebsocketConsumer(JWTAuthConsumerMixin, AsyncWebsocketConsumer):
+class AuthenticatedWebsocketConsumer(SocketAuthConsumerMixin, AsyncWebsocketConsumer):
     pass
 
 
 class AuthenticatedJsonWebsocketConsumer(
-    JWTAuthConsumerMixin, AsyncJsonWebsocketConsumer
+    SocketAuthConsumerMixin, AsyncJsonWebsocketConsumer
 ):
     pass
