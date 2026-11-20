@@ -1,16 +1,21 @@
-import json, websockets
-from accounts.custom_functions import get_access_token
+import json
+
+import websockets
 from decouple import config
+
+from accounts.custom_functions import get_access_token
+
 HOST = config("HOST")
+
 
 async def user_notification(receiver, data):
     notification_data = {
         "notification_type": data.pop("notification_type"),
-        "notification_data": data
-        }
-    
+        "notification_data": data,
+    }
+
     access = get_access_token({"user_id": (str(receiver.id))})
     uri = f"ws://{HOST}/ws/notification/"
-   
-    async with websockets.connect(uri, extra_headers={"token":access}) as websocket:
-        await websocket.send(json.dumps({"data":notification_data}))
+
+    async with websockets.connect(uri, extra_headers={"token": access}) as websocket:
+        await websocket.send(json.dumps({"data": notification_data}))

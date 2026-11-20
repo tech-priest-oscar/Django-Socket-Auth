@@ -1,0 +1,73 @@
+# See https://pre-commit.com for more information
+# Install the git hook once with:  make pre-commit-install
+# Run against every file with:     make pre-commit
+default_language_version:
+  python: python3
+default_stages: [pre-commit, commit-msg, post-commit]
+
+exclude: |
+  (?x)^(
+    docs/.*|
+    .*/migrations/.*|
+    venv/.*|
+    .*\.postman_collection\.json
+  )$
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: debug-statements
+      - id: detect-private-key
+      - id: mixed-line-ending
+
+  - repo: https://github.com/asottile/pyupgrade
+    rev: v3.21.2
+    hooks:
+      - id: pyupgrade
+        args: [--py39-plus]
+
+  - repo: https://github.com/adamchainz/django-upgrade
+    rev: 1.33.0
+    hooks:
+      - id: django-upgrade
+        args: [--target-version, "4.2"]
+
+  # isort runs before black; both use the "black" profile (see setup.cfg)
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.12.0
+    hooks:
+      - id: isort
+
+  - repo: https://github.com/psf/black
+    rev: 25.9.0
+    hooks:
+      - id: black
+
+  - repo: https://github.com/PyCQA/flake8
+    rev: 7.3.0
+    hooks:
+      - id: flake8
+        args: ["--config=setup.cfg"]
+        additional_dependencies: [flake8-isort]
+
+  # Formatting and import sorting are handled by black/isort above;
+  # ruff is kept only for its extra lint rules (bugbear, pyupgrade, Django).
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.6
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+
+# pre-commit.ci: keeps hook versions up to date
+ci:
+  autoupdate_schedule: weekly
+  skip: []
+  submodules: false
