@@ -7,4 +7,4 @@ djangorestframework-simplejwt access tokens by default.
     from django_socket_auth.backends import BaseBackend, TokenBackend
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
