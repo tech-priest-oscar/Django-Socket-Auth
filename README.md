@@ -1,5 +1,9 @@
 # django-socket-auth
 
+[![PyPI version](https://img.shields.io/pypi/v/django-socket-auth.svg)](https://pypi.org/project/django-socket-auth/)
+[![Python versions](https://img.shields.io/pypi/pyversions/django-socket-auth.svg)](https://pypi.org/project/django-socket-auth/)
+[![License: MIT](https://img.shields.io/pypi/l/django-socket-auth.svg)](https://github.com/tech-priest-oscar/Django-Socket-Auth/blob/master/LICENSE)
+
 Pluggable authentication for [Django Channels](https://channels.readthedocs.io/)
 websocket consumers.
 
@@ -24,6 +28,12 @@ also plug in your own authentication: return a user and it goes into
 - djangorestframework-simplejwt 5.3+
 
 ## Installation
+
+```bash
+pip install django-socket-auth
+```
+
+To try the latest unreleased code from GitHub instead:
 
 ```bash
 pip install git+https://github.com/tech-priest-oscar/Django-Socket-Auth.git

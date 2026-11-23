@@ -46,7 +46,7 @@ dependencies = [
     "djangorestframework-simplejwt>=5.3",
 ]
 
-# Links shown in the PyPI sidebar. Delete any you don't have.
+
 [project.urls]
 Homepage = "https://github.com/tech-priest-oscar/Django-Socket-Auth"
 Documentation = "https://github.com/tech-priest-oscar/Django-Socket-Auth#readme"
