@@ -1,2 +1,4 @@
-# Install the package in editable mode for local development
--e .
+django-socket-auth>=0.1.1
+# ASGI server (serves both HTTP and websockets)
+uvicorn>=0.30
+websockets>=13

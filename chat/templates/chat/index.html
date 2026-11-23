@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>django-socket-auth demo</title>
+  <style>
+    :root { color-scheme: light dark; --border: #8884; --muted: #888; --accent: #2563eb; }
+    * { box-sizing: border-box; }
+    body { font: 15px/1.5 system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+    .sub { color: var(--muted); margin-top: 0; }
+    section { border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+    h2 { font-size: 1rem; margin: 0 0 .75rem; }
+    form, .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+    input { flex: 1; min-width: 8rem; padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 6px; font: inherit; background: transparent; color: inherit; }
+    button { padding: .45rem .9rem; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
+    button.secondary { background: transparent; color: var(--accent); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .status { color: var(--muted); margin: .5rem 0 0; }
+    code { font-size: .85em; word-break: break-all; }
+    #log { list-style: none; padding: 0; margin: 0; height: 280px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+    #log li { padding: .35rem .6rem; border-bottom: 1px solid var(--border); }
+    #log li.system { color: var(--muted); font-style: italic; }
+    #log li.error { color: #dc2626; }
+    #log .user { font-weight: 600; }
+    #message-form { margin-top: .5rem; }
+  </style>
+</head>
+<body>
+  <h1>django-socket-auth demo</h1>
+  <p class="sub">Log in to get a JWT, then use it to open an authenticated websocket.</p>
+
+  <section>
+    <h2>1. Log in</h2>
+    <form id="login-form">
+      <input id="username" placeholder="Username" autocomplete="username" required>
+      <input id="password" type="password" placeholder="Password" autocomplete="current-password" required>
+      <button type="submit">Log in</button>
+    </form>
+    <p class="status" id="login-status">Not logged in. Demo users: <b>alice</b> / <b>bob</b>, password <b>demo-pass-123</b>.</p>
+  </section>
+
+  <section>
+    <h2>2. Connect to a room</h2>
+    <div class="row">
+      <input id="room" value="lobby" placeholder="Room name" pattern="[A-Za-z0-9_-]{1,50}">
+      <button id="connect" disabled>Connect</button>
+      <button id="connect-anon" class="secondary" title="Shows what happens without a valid token">Connect without token</button>
+      <button id="disconnect" class="secondary" disabled>Disconnect</button>
+    </div>
+    <p class="status" id="socket-status">Disconnected.</p>
+  </section>
+
+  <section>
+    <h2>3. Send messages</h2>
+    <ul id="log"></ul>
+    <form id="message-form">
+      <input id="message" placeholder="Type a message…" autocomplete="off" disabled>
+      <button type="submit" id="send" disabled>Send</button>
+    </form>
+    <p class="status">Tip: open this page in a second window, log in as the other user, join the same room, and chat.</p>
+  </section>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let accessToken = null;
+    let socket = null;
+
+    function log(text, cls = "", user = null) {
+      const li = document.createElement("li");
+      if (cls) li.className = cls;
+      if (user) {
+        const name = document.createElement("span");
+        name.className = "user";
+        name.textContent = user + ": ";
+        li.append(name);
+      }
+      li.append(document.createTextNode(text));  // textContent, never innerHTML
+      $("log").append(li);
+      $("log").scrollTop = $("log").scrollHeight;
+    }
+
+    function setConnected(connected) {
+      $("connect").disabled = connected || !accessToken;
+      $("connect-anon").disabled = connected;
+      $("disconnect").disabled = !connected;
+      $("message").disabled = !connected;
+      $("send").disabled = !connected;
+      if (connected) $("message").focus();
+    }
+
+    // 1. Log in: POST username/password to simplejwt, keep the access token.
+    $("login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const res = await fetch("/api/token/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: $("username").value, password: $("password").value }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        accessToken = null;
+        $("login-status").textContent = "Login failed: " + (data.detail || res.statusText);
+      } else {
+        accessToken = data.access;
+        $("login-status").innerHTML = "";
+        $("login-status").append(
+          "Logged in as " + $("username").value + ". Access token: ",
+          Object.assign(document.createElement("code"), { textContent: accessToken.slice(0, 32) + "…" }),
+        );
+      }
+      setConnected(socket?.readyState === WebSocket.OPEN);
+    });
+
+    // 2. Connect: browsers can't set websocket headers, so the token goes in ?token=
+    function connect(token) {
+      const room = $("room").value.trim();
+      if (!$("room").checkValidity() || !room) {
+        $("socket-status").textContent = "Room names may only use letters, digits, - and _.";
+        return;
+      }
+      const scheme = location.protocol === "https:" ? "wss" : "ws";
+      const query = token ? "?token=" + encodeURIComponent(token) : "";
+      socket = new WebSocket(`${scheme}://${location.host}/ws/chat/${room}/${query}`);
+      $("socket-status").textContent = "Connecting…";
+
+      socket.addEventListener("open", () => setConnected(true));
+
+      socket.addEventListener("message", (e) => {
+        const data = JSON.parse(e.data);
+        if (data.type === "welcome") {
+          $("socket-status").textContent = `Connected to "${data.room}" as ${data.user}.`;
+          log(`You joined "${data.room}" as ${data.user}.`, "system");
+        } else if (data.type === "message") {
+          log(data.message, "", data.user);
+        }
+      });
+
+      socket.addEventListener("close", (e) => {
+        setConnected(false);
+        if (e.code === 4001) {
+          $("socket-status").textContent = "Rejected: close code 4001 (not authenticated).";
+          log("Server closed the connection with 4001: missing, invalid or expired token.", "error");
+        } else {
+          $("socket-status").textContent = `Disconnected (code ${e.code}).`;
+          log(`Disconnected (code ${e.code}).`, "system");
+        }
+        socket = null;
+      });
+    }
+
+    $("connect").addEventListener("click", () => connect(accessToken));
+    $("connect-anon").addEventListener("click", () => connect(null));
+    $("disconnect").addEventListener("click", () => socket?.close());
+
+    // 3. Send: the server broadcasts it to everyone in the room, including you.
+    $("message-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const text = $("message").value.trim();
+      if (!text || socket?.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ message: text }));
+      $("message").value = "";
+    });
+  </script>
+</body>
+</html>
