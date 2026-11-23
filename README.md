@@ -103,7 +103,8 @@ const socket = new WebSocket(`wss://example.com/ws/chat/?token=${accessToken}`);
 
 socket.addEventListener("close", (event) => {
   if (event.code === 4001) {
-    // Not authenticated: refresh the access token and reconnect.
+    // Not authenticated, or the token expired while connected:
+    // refresh the access token and reconnect.
   }
 });
 ```
@@ -152,13 +153,47 @@ consumer, so you can still serve anonymous users on some routes if you want.
 | `SocketAuthConsumerMixin` | Adding the check to your own consumer base class |
 
 Unauthenticated connections are accepted and then immediately closed with
-code **4001**, so the client can tell an auth failure apart from other errors.
-To use a different code, set `unauthenticated_close_code` on your consumer:
+code **4001** (`CloseCode.UNAUTHENTICATED`), so the client can tell an auth
+failure apart from other errors. To use a different code, set
+`unauthenticated_close_code` on your consumer:
 
 ```python
 class ChatConsumer(AuthenticatedJsonWebsocketConsumer):
     unauthenticated_close_code = 4003
 ```
+
+### Token expiry
+
+Connections are closed when the user's token expires, not just checked when
+they open. `SimpleJWTBackend` records the access token's `exp` claim in
+`scope["token_expires_at"]`, and the authenticated consumers enforce it in two
+ways:
+
+| Check | What it does |
+|---|---|
+| Every incoming message | Before any handler runs, each message is checked: from the client (`receive`) or from the channel layer (e.g. a `group_send` event). After expiry the message is dropped and the connection is closed, so **nothing is processed or delivered once the token has expired**. |
+| A timer | Closes idle connections at the moment the token expires. The timer runs in the same process as the connection and is cancelled however the consumer stops, so it can never outlive it. |
+
+Both close with code **4001** by default, the same as a missing or invalid
+token, so clients handle every case the same way: refresh the token and
+reconnect. To tell them apart, set a different code:
+
+```python
+class ChatConsumer(AuthenticatedJsonWebsocketConsumer):
+    token_expired_close_code = 4002
+```
+
+`self.token_expires_at` holds the expiry as a Unix timestamp (or `None`).
+Backends that don't record an expiry are unaffected: their connections stay
+open until either side closes them.
+
+Two limits to be aware of:
+
+- Only messages go through the check. Data you send from your own background
+  tasks (outside a handler) isn't checked; call `self.token_has_expired()`
+  first.
+- Revoking a token early (blacklisting it, deactivating the user) isn't
+  detected. The connection stays open until the token's normal expiry time.
 
 To use the mixin with your own base class, put it first:
 
@@ -197,11 +232,17 @@ works.
 |---|---|---|---|
 | `authenticate_token(self, token)` | Yes | The raw token string (never empty) | A user object, or `None` |
 | `get_raw_token(self, scope)` | No (override to read the token from elsewhere) | The ASGI connection `scope` dict | The token string, or `None` |
+| `get_token_expiry(self, token)` | No (override to disconnect users when the token expires) | The raw token string, after it authenticated a user | A Unix timestamp, or `None` if it doesn't expire |
 
 Do not override `authenticate` on a `TokenBackend`. It is what calls
 `get_raw_token` and then `authenticate_token`.
 
-Each method can be a normal `def` or an `async def`.
+Each method can be a normal `def` or an `async def`, except
+`get_token_expiry`, which must be a normal `def`.
+
+A `BaseBackend` can enable expiry too: set
+`scope[ScopeKey.TOKEN_EXPIRES_AT]` (a Unix timestamp) in `authenticate` before
+returning the user. It is ignored unless that backend authenticates the user.
 
 #### Rules for every backend
 
@@ -258,6 +299,11 @@ class MyTokenBackend(TokenBackend):
     # Optional: only if the token lives somewhere else.
     # def get_raw_token(self, scope):
     #     return dict(scope["headers"]).get(b"x-api-key", b"").decode() or None
+
+    # Optional: close the connection when the token expires.
+    # def get_token_expiry(self, token):
+    #     key = ApiKey.objects.filter(key=token).first()
+    #     return key.expires_at.timestamp() if key and key.expires_at else None
 
 
 class MyAsyncTokenBackend(TokenBackend):
@@ -333,6 +379,20 @@ SocketAuthMiddleware(URLRouter(websocket_urlpatterns), auth_backends=[ApiKeyBack
 `auth_backends` takes dotted paths, classes or instances. Passing it overrides
 `SOCKET_AUTH_BACKENDS` for that middleware.
 
+## Constants
+
+Close codes, ASGI message types and scope keys are enums in
+`django_socket_auth.enums`. They subclass `int`/`str`, so they compare equal to
+the plain values:
+
+```python
+from django_socket_auth.enums import CloseCode, MessageType, ScopeKey
+
+CloseCode.UNAUTHENTICATED       # 4001
+MessageType.DISCONNECT          # "websocket.disconnect"
+ScopeKey.TOKEN_EXPIRES_AT       # "token_expires_at"
+```
+
 ## Configuration
 
 | Setting | Default | |
@@ -349,8 +409,9 @@ SocketAuthMiddleware(URLRouter(websocket_urlpatterns), auth_backends=[ApiKeyBack
   full URLs. Keep access tokens short-lived, or use a header where the client
   supports it.
 - **Use `wss://` in production** so tokens are not sent in plain text.
-- **The user is checked once, at connect time.** A connection stays open after
-  its token expires. Close long-lived connections yourself if that matters.
+- **Expired tokens are enforced, revoked ones aren't.** Connections close when
+  the token expires (see [Token expiry](#token-expiry)), but blacklisting a
+  token or deactivating a user doesn't close a connection that's already open.
 
 ## Development
 
@@ -359,6 +420,6 @@ python -m venv venv
 venv/bin/pip install -r requirements.txt
 make pre-commit-install
 
-make test         # run the test suite
+make test         # run the test suite (needs daphne: pip install daphne)
 make pre-commit   # format and lint everything
 ```

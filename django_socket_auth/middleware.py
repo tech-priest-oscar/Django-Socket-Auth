@@ -6,6 +6,7 @@ from channels.db import database_sync_to_async
 from channels.middleware import BaseMiddleware
 from django.contrib.auth.models import AnonymousUser
 
+from django_socket_auth.enums import ScopeKey
 from django_socket_auth.utils import load_backends
 
 
@@ -26,11 +27,14 @@ class SocketAuthMiddleware(BaseMiddleware):
 
     async def __call__(self, scope, receive, send):
         scope = dict(scope)
-        scope["user"] = await self.get_user(scope)
+        scope[ScopeKey.USER] = await self.get_user(scope)
         return await super().__call__(scope, receive, send)
 
     async def get_user(self, scope):
         for backend in self.auth_backends:
+            # Only the backend that authenticates the user may set the token
+            # expiry; discard anything a failed backend left behind.
+            scope.pop(ScopeKey.TOKEN_EXPIRES_AT, None)
             if inspect.iscoroutinefunction(backend.authenticate):
                 user = await backend.authenticate(scope)
             else:
@@ -42,4 +46,5 @@ class SocketAuthMiddleware(BaseMiddleware):
             # backend failed; try the next one.
             if getattr(user, "is_authenticated", False):
                 return user
+        scope.pop(ScopeKey.TOKEN_EXPIRES_AT, None)
         return AnonymousUser()
